@@ -1,0 +1,36 @@
+[package]
+name = "bellwright_gold_editor"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.74"
+authors = ["Brad Moeller <2386732+BradMoeller@users.noreply.github.com>"]
+description = "Cross-platform GUI/CLI to view and edit player gold in Bellwright save files."
+repository = "https://github.com/BradMoeller/bellwright"
+homepage = "https://github.com/BradMoeller/bellwright"
+license = "MIT"
+readme = "README.md"
+keywords = ["bellwright", "savegame", "save-editor", "game", "modding"]
+categories = ["games", "command-line-utilities"]
+exclude = ["docs/screenshot.png", ".github/"]
+
+[dependencies]
+oozextract = "0.5"
+eframe = { version = "0.28", optional = true }
+rfd = { version = "0.14", optional = true }
+
+[features]
+default = ["gui"]
+gui = ["dep:eframe", "dep:rfd"]
+
+[[bin]]
+name = "bellwright-gold-editor"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[[bin]]
+name = "bellwright-gold-cli"
+path = "src/bin/cli.rs"
+
+[profile.release]
+opt-level = 3
+strip = true

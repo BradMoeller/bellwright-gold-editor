@@ -1,0 +1,178 @@
+//! Cross-platform GUI for viewing and editing player gold in Bellwright saves.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // no console on Windows release
+
+use bellwright_gold_editor::SaveFile;
+use eframe::egui;
+use std::path::PathBuf;
+
+struct Loaded {
+    path: PathBuf,
+    name: String,
+    village: String,
+    character: String,
+    gold: u64,
+}
+
+#[derive(Default)]
+struct App {
+    loaded: Option<Loaded>,
+    input: String,
+    status: String,
+    is_error: bool,
+    pending_drop: Option<PathBuf>,
+}
+
+impl App {
+    /// Create the app, optionally opening a save passed on the command line
+    /// (enables `bellwright-gold-editor <save.sav>` and OS file associations).
+    fn new(initial: Option<PathBuf>) -> Self {
+        let mut app = Self::default();
+        if let Some(path) = initial {
+            app.open(path);
+        }
+        app
+    }
+
+    fn open(&mut self, path: PathBuf) {
+        match SaveFile::load(&path).and_then(|s| s.find_gold().map(|g| (s, g.value))) {
+            Ok((s, gold)) => {
+                self.input = gold.to_string();
+                self.loaded = Some(Loaded {
+                    path,
+                    name: s.display_name,
+                    village: s.village,
+                    character: s.character,
+                    gold,
+                });
+                self.status = "Loaded. Edit the amount and click Apply.".into();
+                self.is_error = false;
+            }
+            Err(e) => {
+                self.loaded = None;
+                self.status = e.to_string();
+                self.is_error = true;
+            }
+        }
+    }
+
+    fn apply(&mut self) {
+        let Some(l) = &self.loaded else { return };
+        let amount = match self.input.trim().parse::<u64>() {
+            Ok(v) => v,
+            Err(_) => {
+                self.status = "Enter a whole number ≥ 0.".into();
+                self.is_error = true;
+                return;
+            }
+        };
+        match bellwright_gold_editor::set_gold_on_disk(&l.path, amount) {
+            Ok(()) => {
+                let path = l.path.clone();
+                self.open(path); // reload to reflect new value
+                self.status = format!("Saved. Gold set to {amount}. Backup at <file>.bak.");
+                self.is_error = false;
+            }
+            Err(e) => {
+                self.status = e.to_string();
+                self.is_error = true;
+            }
+        }
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Bellwright Gold Editor");
+            ui.add_space(6.0);
+
+            if ui.button("📂  Open save file…").clicked() {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Bellwright save", &["sav"])
+                    .set_title("Choose a Bellwright .sav file")
+                    .pick_file()
+                {
+                    self.open(path);
+                }
+            }
+
+            // Accept drag-and-dropped files.
+            ctx.input(|i| {
+                if let Some(f) = i.raw.dropped_files.first() {
+                    if let Some(p) = &f.path {
+                        let p = p.clone();
+                        // defer borrow: store then open after closure
+                        self.pending_drop = Some(p);
+                    }
+                }
+            });
+            if let Some(p) = self.pending_drop.take() {
+                self.open(p);
+            }
+
+            ui.add_space(10.0);
+
+            if let Some(l) = &self.loaded {
+                egui::Grid::new("info").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+                    ui.label("File:");
+                    ui.label(l.path.file_name().and_then(|s| s.to_str()).unwrap_or(""));
+                    ui.end_row();
+                    ui.label("Save name:");
+                    ui.label(&l.name);
+                    ui.end_row();
+                    ui.label("Village:");
+                    ui.label(&l.village);
+                    ui.end_row();
+                    ui.label("Character:");
+                    ui.label(&l.character);
+                    ui.end_row();
+                    ui.label("Current gold:");
+                    ui.strong(l.gold.to_string());
+                    ui.end_row();
+                });
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    ui.label("New gold:");
+                    ui.add(egui::TextEdit::singleline(&mut self.input).desired_width(120.0));
+                    if ui.button("Apply").clicked() {
+                        self.apply();
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("⚠ Close the game (or return to main menu) before applying, then load the save.")
+                    .small().italics());
+            } else {
+                ui.label("Open a save to begin. Saves live under:");
+                ui.label(egui::RichText::new(
+                    "…/Bellwright/Saved/SaveGames/<id>/Klint_<slot>.sav").monospace().small());
+            }
+
+            ui.add_space(12.0);
+            if !self.status.is_empty() {
+                let color = if self.is_error {
+                    egui::Color32::from_rgb(0xCC, 0x33, 0x33)
+                } else {
+                    egui::Color32::from_rgb(0x2E, 0x8B, 0x57)
+                };
+                ui.colored_label(color, &self.status);
+            }
+        });
+    }
+}
+
+fn main() -> eframe::Result<()> {
+    let initial = std::env::args().nth(1).map(PathBuf::from);
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([600.0, 430.0]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "Bellwright Gold Editor",
+        options,
+        Box::new(move |cc| {
+            cc.egui_ctx.set_zoom_factor(1.4); // enlarge all text/widgets
+            Ok(Box::new(App::new(initial)))
+        }),
+    )
+}
