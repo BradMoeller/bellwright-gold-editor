@@ -1,6 +1,6 @@
 # Bellwright Gold Editor
 
-[![CI](https://github.com/BradMoeller/bellwright/actions/workflows/ci.yml/badge.svg)](https://github.com/BradMoeller/bellwright/actions/workflows/ci.yml)
+[![CI](https://github.com/BradMoeller/bellwright-gold-editor/actions/workflows/ci.yml/badge.svg)](https://github.com/BradMoeller/bellwright-gold-editor/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Made with Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 
@@ -25,14 +25,14 @@ write is re-parsed and verified before the file is replaced.
 
 ### Prebuilt binaries
 Grab the latest build for your OS from the
-[**Releases**](https://github.com/BradMoeller/bellwright/releases) page.
+[**Releases**](https://github.com/BradMoeller/bellwright-gold-editor/releases) page.
 
 ### Build from source
 Requires the [Rust toolchain](https://rustup.rs).
 
 ```bash
-git clone https://github.com/BradMoeller/bellwright
-cd bellwright
+git clone https://github.com/BradMoeller/bellwright-gold-editor
+cd bellwright-gold-editor
 cargo run --release          # build + launch the GUI
 ```
 
