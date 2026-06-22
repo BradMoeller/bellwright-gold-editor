@@ -1,9 +1,15 @@
-//! Core logic for reading and editing player gold in Bellwright `.sav` files.
+//! Core logic for reading and editing player stats in Bellwright `.sav` files.
 //!
 //! Format: a UE `FArchive::SerializeCompressed` container ("VSWB") whose payload
-//! is a custom protobuf blob. Player gold is protobuf field 6 inside a uniquely
-//! shaped record: `field5(len 4) -> field6(varint)=GOLD -> field7...`, i.e. the
-//! byte signature `2a 04 ?? ?? ?? ?? 30 <varint> 3a`, which is globally unique.
+//! is a custom protobuf blob.
+//!
+//! **Gold** is protobuf field 6 inside a record matched by the globally-unique
+//! signature `2a 04 ?? ?? ?? ?? 30 <varint> 3a`.
+//!
+//! **Renown** is one entry in a large list of identically-shaped reputation
+//! records `20 89 c8 9b dd 02 22 <len> 08 <id1> 10 <value> 28 bb 0d`; nothing
+//! structural is unique to it, so the record is located by matching `<value>`
+//! against the player's known current renown (see `find_renown`).
 //!
 //! This module has no GUI dependencies so it can be unit-tested directly.
 
@@ -17,7 +23,8 @@ pub enum Error {
     Io(String),
     BadFile(String),
     Decompress(String),
-    GoldNotFound(usize), // number of candidate matches found (0 or >1)
+    GoldNotFound(usize),   // number of candidate matches found (0 or >1)
+    RenownNotFound(usize), // number of candidate matches found (0 or >1)
     ParseError(String),
     TooLarge(String),
 }
@@ -28,10 +35,9 @@ impl std::fmt::Display for Error {
             Error::BadFile(s) => write!(f, "Not a recognizable Bellwright save: {s}"),
             Error::Decompress(s) => write!(f, "Decompression failed: {s}"),
             Error::GoldNotFound(0) => write!(f, "Could not locate the gold field in this save."),
-            Error::GoldNotFound(n) => write!(
-                f,
-                "Ambiguous: found {n} possible gold fields; refusing to edit."
-            ),
+            Error::GoldNotFound(n) => write!(f, "Ambiguous: found {n} possible gold fields; refusing to edit."),
+            Error::RenownNotFound(0) => write!(f, "Could not locate the renown field in this save."),
+            Error::RenownNotFound(n) => write!(f, "Ambiguous: found {n} possible renown fields; refusing to edit."),
             Error::ParseError(s) => write!(f, "Save structure error: {s}"),
             Error::TooLarge(s) => write!(f, "Unsupported edit: {s}"),
         }
@@ -100,6 +106,13 @@ pub struct SaveFile {
 pub struct GoldLoc {
     pub tag_off: usize,   // offset of the field-6 tag byte (0x30)
     pub value_off: usize, // offset of the first varint byte
+    pub byte_len: usize,  // current varint byte length
+    pub value: u64,
+}
+
+/// Location of the renown field within the decompressed payload.
+pub struct RenownLoc {
+    pub value_off: usize, // offset of the first varint byte of the renown value
     pub byte_len: usize,  // current varint byte length
     pub value: u64,
 }
@@ -197,6 +210,160 @@ impl SaveFile {
         }
     }
 
+    /// Locate the renown record by its **current value**.
+    ///
+    /// Renown is one entry in a large list of identically-shaped reputation
+    /// records; nothing structural is unique to it (the surrounding id, UUID and
+    /// timestamps all vary or repeat — see `bellwright_renown/FINDINGS.md`). The
+    /// only reliable discriminator is the value, which the player reads off the
+    /// character sheet. We look for records of the shape
+    ///
+    /// `20 89 C8 9B DD 02  22 <len>  08 <id1>  10 <value>  28 BB 0D`
+    ///
+    /// whose `value == current_value` and require exactly one match. If two
+    /// records share the value (possible for round numbers) we refuse rather
+    /// than guess; the player can nudge renown in-game to make it unique.
+    pub fn find_renown(&self, current_value: u64) -> Result<RenownLoc, Error> {
+        let d = &self.decompressed;
+        // Constant `record-type` prefix, up to and including the `22` submsg tag.
+        const ANCHOR: &[u8] = &[0x20, 0x89, 0xC8, 0x9B, 0xDD, 0x02, 0x22];
+        // Constant id2 trailer (field 5 = 1723) immediately after the submessage.
+        const ID2: &[u8] = &[0x28, 0xBB, 0x0D];
+
+        let mut hits = Vec::new();
+        let mut i = 0usize;
+        while i + ANCHOR.len() < d.len() {
+            if &d[i..i + ANCHOR.len()] != ANCHOR {
+                i += 1;
+                continue;
+            }
+            i += 1; // advance past this anchor for the next search regardless
+            let q = i - 1 + ANCHOR.len();
+            // Submessage length, then its bounds.
+            let Some((sublen, sub_start, _)) = read_varint(d, q) else { continue };
+            let sub_end = sub_start + sublen as usize;
+            if sub_end + ID2.len() > d.len() {
+                continue;
+            }
+            // Submessage must be exactly `08 <id1> 10 <value>`.
+            if d[sub_start] != 0x08 {
+                continue;
+            }
+            let Some((_id1, after_id1, _)) = read_varint(d, sub_start + 1) else { continue };
+            if after_id1 >= d.len() || d[after_id1] != 0x10 {
+                continue;
+            }
+            let Some((val, after_val, vl)) = read_varint(d, after_id1 + 1) else { continue };
+            // The value must end exactly at the submessage boundary, and the
+            // constant id2 trailer must follow.
+            if after_val != sub_end || &d[sub_end..sub_end + ID2.len()] != ID2 {
+                continue;
+            }
+            if val == current_value {
+                hits.push(RenownLoc {
+                    value_off: after_id1 + 1,
+                    byte_len: vl,
+                    value: val,
+                });
+            }
+        }
+        match hits.len() {
+            1 => Ok(hits.pop().unwrap()),
+            n => Err(Error::RenownNotFound(n)),
+        }
+    }
+
+    /// Produce a new save (raw bytes) with renown changed from `current_value`
+    /// to `new_value`. `current_value` is needed to locate the record (see
+    /// [`find_renown`]). Does not write to disk.
+    pub fn with_renown(&self, current_value: u64, new_value: u64) -> Result<Vec<u8>, Error> {
+        let loc = self.find_renown(current_value)?;
+        let new_bytes = encode_varint(new_value);
+        let delta_inner = new_bytes.len() as isize - loc.byte_len as isize;
+
+        let mut edits: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+        if delta_inner != 0 {
+            // `ancestor_chain` keys off the field's *tag* offset; the renown
+            // value's `0x10` tag is the byte just before the value varint.
+            let chain = self.ancestor_chain(loc.value_off - 1)?;
+            let mut delta = delta_inner;
+            for &(lp_off, length, lp_len) in chain.iter().rev() {
+                let new_len = length as isize + delta;
+                if new_len < 0 {
+                    return Err(Error::ParseError("negative container length".into()));
+                }
+                let nb = encode_varint(new_len as u64);
+                let lp_delta = nb.len() as isize - lp_len as isize;
+                edits.push((lp_off, lp_len, nb));
+                delta += lp_delta;
+            }
+        }
+        edits.push((loc.value_off, loc.byte_len, new_bytes));
+        edits.sort_by_key(|e| e.0);
+
+        let mut nd = Vec::with_capacity(self.decompressed.len() + 8);
+        let mut cur = 0usize;
+        for (off, old_len, bytes) in &edits {
+            nd.extend_from_slice(&self.decompressed[cur..*off]);
+            nd.extend_from_slice(bytes);
+            cur = off + old_len;
+        }
+        nd.extend_from_slice(&self.decompressed[cur..]);
+
+        let total_delta = nd.len() as isize - self.decompressed.len() as isize;
+        let new_total = (self.total as isize + total_delta) as usize;
+        let emin = edits.first().unwrap().0;
+        let emax = edits.iter().map(|(o, l, _)| o + l).max().unwrap();
+        let c0 = emin / BLOCK;
+        let c1 = (emax - 1) / BLOCK;
+
+        if new_total.div_ceil(BLOCK) != self.nchunks {
+            return Err(Error::TooLarge(
+                "edit changes chunk count (near a block boundary)".into(),
+            ));
+        }
+
+        let mut out = self.raw[..self.data_start].to_vec();
+        let mut new_table = self.chunks.clone();
+        #[allow(clippy::needless_range_loop)]
+        for i in c0..=c1 {
+            let mut uncomp = self.chunks[i].1;
+            if i == c1 { uncomp = (uncomp as isize + total_delta) as usize; }
+            new_table[i].1 = uncomp;
+        }
+
+        let mut nd_pos = c0 * BLOCK;
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..self.nchunks {
+            if i >= c0 && i <= c1 {
+                let uncomp = new_table[i].1;
+                let comp = uncomp + 2;
+                out.push(0xCC); out.push(0x06);
+                out.extend_from_slice(&nd[nd_pos..nd_pos + uncomp]);
+                nd_pos += uncomp;
+                new_table[i].0 = comp;
+                let b = TABLE_OFF + i * 16;
+                out[b+1] = (comp & 0xFF) as u8;
+                out[b+2] = ((comp >> 8) & 0xFF) as u8;
+                out[b+3] = ((comp >> 16) & 0xFF) as u8;
+                out[b+9]  = (uncomp & 0xFF) as u8;
+                out[b+10] = ((uncomp >> 8) & 0xFF) as u8;
+                out[b+11] = ((uncomp >> 16) & 0xFF) as u8;
+            } else {
+                let (comp, _, pos) = self.chunks[i];
+                out.extend_from_slice(&self.raw[pos..pos + comp]);
+            }
+        }
+
+        out[0x18..0x20].copy_from_slice(&(new_total as u64).to_le_bytes());
+        out[0x489..0x48d].copy_from_slice(&(new_total as u32).to_le_bytes());
+        let sum_comp: usize = new_table.iter().map(|c| c.0).sum();
+        out[0x481..0x485].copy_from_slice(&(sum_comp as u32).to_le_bytes());
+
+        verify_renown(&out, &nd)?;
+        Ok(out)
+    }
+
     /// Walk the protobuf tree from the root and return the chain of
     /// length-delimited containers (innermost last) whose value range contains
     /// `target` (the gold tag offset). Each item is (len_prefix_offset,
@@ -215,7 +382,7 @@ impl SaveFile {
                     .ok_or_else(|| Error::ParseError(format!("bad tag @0x{i:x}")))?;
                 let wire = (tag & 7) as u8;
                 if i == target {
-                    // reached the gold field itself; chain complete
+                    // reached the target field's tag; chain complete
                     return Ok(chain);
                 }
                 match wire {
@@ -252,7 +419,7 @@ impl SaveFile {
             }
             // target not found inside any nested container at this level
             return Err(Error::ParseError(
-                "gold field not reachable by parse".into(),
+                "target field not reachable by parse".into(),
             ));
         }
     }
@@ -389,19 +556,62 @@ fn verify(bytes: &[u8], expected: u64) -> Result<(), Error> {
     }
 }
 
+/// Verify a freshly built renown save by reloading it and confirming the
+/// decompressed payload exactly matches what we spliced. This is
+/// value-independent (the renown finder needs a value to locate the record, so
+/// we can't re-find by value robustly — and don't need to: the new value is
+/// guaranteed correct by construction of `expected`).
+fn verify_renown(bytes: &[u8], expected: &[u8]) -> Result<(), Error> {
+    let tmp = std::env::temp_dir().join(format!("bw_verify_renown_{}.tmp", std::process::id()));
+    std::fs::write(&tmp, bytes).map_err(|e| Error::Io(e.to_string()))?;
+    let res = SaveFile::load(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    let s = res?;
+    if s.decompressed == expected {
+        Ok(())
+    } else {
+        Err(Error::ParseError(
+            "post-write verify: reloaded payload differs from edit".into(),
+        ))
+    }
+}
+
+fn bak_path(path: &Path) -> std::path::PathBuf {
+    path.with_extension(format!(
+        "{}.bak",
+        path.extension().and_then(|e| e.to_str()).unwrap_or("sav")
+    ))
+}
+
+fn ensure_backup(path: &Path) -> Result<(), Error> {
+    let bak = bak_path(path);
+    if !bak.exists() {
+        std::fs::copy(path, &bak).map_err(|e| Error::Io(e.to_string()))?;
+    }
+    Ok(())
+}
+
 /// Convenience: write `new_value` into the save at `path`, creating a one-time
 /// `<path>.bak` backup of the original if one doesn't already exist.
 pub fn set_gold_on_disk<P: AsRef<Path>>(path: P, new_value: u64) -> Result<(), Error> {
     let path = path.as_ref();
-    let save = SaveFile::load(path)?;
-    let out = save.with_gold(new_value)?;
-    let bak = path.with_extension(format!(
-        "{}.bak",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("sav")
-    ));
-    if !bak.exists() {
-        std::fs::copy(path, &bak).map_err(|e| Error::Io(e.to_string()))?;
-    }
+    let out = SaveFile::load(path)?.with_gold(new_value)?;
+    ensure_backup(path)?;
+    std::fs::write(path, &out).map_err(|e| Error::Io(e.to_string()))?;
+    Ok(())
+}
+
+/// Convenience: change renown from `current_value` to `new_value` in the save
+/// at `path` (current value is needed to locate the record), creating a one-time
+/// `<path>.bak` backup if one doesn't already exist.
+pub fn set_renown_on_disk<P: AsRef<Path>>(
+    path: P,
+    current_value: u64,
+    new_value: u64,
+) -> Result<(), Error> {
+    let path = path.as_ref();
+    let out = SaveFile::load(path)?.with_renown(current_value, new_value)?;
+    ensure_backup(path)?;
     std::fs::write(path, &out).map_err(|e| Error::Io(e.to_string()))?;
     Ok(())
 }

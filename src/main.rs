@@ -1,4 +1,4 @@
-//! Cross-platform GUI for viewing and editing player gold in Bellwright saves.
+//! Cross-platform GUI for viewing and editing player stats in Bellwright saves.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // no console on Windows release
 
 use bellwright_gold_editor::SaveFile;
@@ -16,15 +16,17 @@ struct Loaded {
 #[derive(Default)]
 struct App {
     loaded: Option<Loaded>,
-    input: String,
+    gold_input: String,
+    // Renown can't be auto-detected (it's one of thousands of identical records),
+    // so the player types the value the game shows plus the value they want.
+    renown_current_input: String,
+    renown_new_input: String,
     status: String,
     is_error: bool,
     pending_drop: Option<PathBuf>,
 }
 
 impl App {
-    /// Create the app, optionally opening a save passed on the command line
-    /// (enables `bellwright-gold-editor <save.sav>` and OS file associations).
     fn new(initial: Option<PathBuf>) -> Self {
         let mut app = Self::default();
         if let Some(path) = initial {
@@ -34,9 +36,20 @@ impl App {
     }
 
     fn open(&mut self, path: PathBuf) {
-        match SaveFile::load(&path).and_then(|s| s.find_gold().map(|g| (s, g.value))) {
-            Ok((s, gold)) => {
-                self.input = gold.to_string();
+        match SaveFile::load(&path) {
+            Ok(s) => {
+                let gold = match s.find_gold() {
+                    Ok(g) => g.value,
+                    Err(e) => {
+                        self.loaded = None;
+                        self.status = e.to_string();
+                        self.is_error = true;
+                        return;
+                    }
+                };
+                self.gold_input = gold.to_string();
+                self.renown_current_input.clear();
+                self.renown_new_input.clear();
                 self.loaded = Some(Loaded {
                     path,
                     name: s.display_name,
@@ -44,7 +57,7 @@ impl App {
                     character: s.character,
                     gold,
                 });
-                self.status = "Loaded. Edit the amount and click Apply.".into();
+                self.status = "Loaded. Edit values and click Apply.".into();
                 self.is_error = false;
             }
             Err(e) => {
@@ -57,33 +70,58 @@ impl App {
 
     fn apply(&mut self) {
         let Some(l) = &self.loaded else { return };
-        let amount = match self.input.trim().parse::<u64>() {
+        let gold = match self.gold_input.trim().parse::<u64>() {
             Ok(v) => v,
             Err(_) => {
-                self.status = "Enter a whole number ≥ 0.".into();
+                self.status = "Gold: enter a whole number ≥ 0.".into();
                 self.is_error = true;
                 return;
             }
         };
-        match bellwright_gold_editor::set_gold_on_disk(&l.path, amount) {
-            Ok(()) => {
-                let path = l.path.clone();
-                self.open(path); // reload to reflect new value
-                self.status = format!("Saved. Gold set to {amount}. Backup at <file>.bak.");
-                self.is_error = false;
+        // Renown is optional: edit it only when both fields are filled in.
+        let cur = self.renown_current_input.trim();
+        let new = self.renown_new_input.trim();
+        let renown = if cur.is_empty() && new.is_empty() {
+            None
+        } else {
+            match (cur.parse::<u64>(), new.parse::<u64>()) {
+                (Ok(c), Ok(n)) => Some((c, n)),
+                _ => {
+                    self.status =
+                        "Renown: enter both the current (in-game) and new value as whole numbers ≥ 0.".into();
+                    self.is_error = true;
+                    return;
+                }
             }
-            Err(e) => {
+        };
+
+        // Apply gold first, then renown (different chunks; order doesn't matter).
+        let path = l.path.clone();
+        if let Err(e) = bellwright_gold_editor::set_gold_on_disk(&path, gold) {
+            self.status = e.to_string();
+            self.is_error = true;
+            return;
+        }
+        if let Some((c, n)) = renown {
+            if let Err(e) = bellwright_gold_editor::set_renown_on_disk(&path, c, n) {
                 self.status = e.to_string();
                 self.is_error = true;
+                return;
             }
         }
+        self.open(path);
+        let renown_msg = renown
+            .map(|(_, n)| format!(", renown to {n}"))
+            .unwrap_or_default();
+        self.status = format!("Saved. Gold set to {gold}{renown_msg}. Backup at <file>.bak.");
+        self.is_error = false;
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Bellwright Gold Editor");
+            ui.heading("Bellwright Save Editor");
             ui.add_space(6.0);
 
             if ui.button("📂  Open save file…").clicked() {
@@ -96,13 +134,10 @@ impl eframe::App for App {
                 }
             }
 
-            // Accept drag-and-dropped files.
             ctx.input(|i| {
                 if let Some(f) = i.raw.dropped_files.first() {
                     if let Some(p) = &f.path {
-                        let p = p.clone();
-                        // defer borrow: store then open after closure
-                        self.pending_drop = Some(p);
+                        self.pending_drop = Some(p.clone());
                     }
                 }
             });
@@ -132,16 +167,28 @@ impl eframe::App for App {
                 });
 
                 ui.add_space(12.0);
-                ui.horizontal(|ui| {
+                egui::Grid::new("inputs").num_columns(3).spacing([8.0, 6.0]).show(ui, |ui| {
                     ui.label("New gold:");
-                    ui.add(egui::TextEdit::singleline(&mut self.input).desired_width(120.0));
-                    if ui.button("Apply").clicked() {
-                        self.apply();
-                    }
+                    ui.add(egui::TextEdit::singleline(&mut self.gold_input).desired_width(100.0));
+                    ui.label("");
+                    ui.end_row();
+                    ui.label("Current renown:");
+                    ui.add(egui::TextEdit::singleline(&mut self.renown_current_input).desired_width(100.0));
+                    ui.label(egui::RichText::new("(value shown in-game)").small().weak());
+                    ui.end_row();
+                    ui.label("New renown:");
+                    ui.add(egui::TextEdit::singleline(&mut self.renown_new_input).desired_width(100.0));
+                    ui.label(egui::RichText::new("(leave both blank to skip)").small().weak());
+                    ui.end_row();
                 });
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("⚠ Close the game (or return to main menu) before applying, then load the save.")
-                    .small().italics());
+                if ui.button("Apply").clicked() {
+                    self.apply();
+                }
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(
+                    "⚠ Close the game (or return to main menu) before applying, then load the save.",
+                ).small().italics());
             } else {
                 ui.label("Open a save to begin. Saves live under:");
                 ui.label(egui::RichText::new(

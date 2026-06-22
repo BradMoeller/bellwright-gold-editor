@@ -5,7 +5,7 @@
 [![Made with Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 
 A small, safe, cross-platform (Windows / macOS / Linux) tool to view and edit
-your **player gold** in [Bellwright](https://store.steampowered.com/app/1812450/Bellwright/)
+your **player gold** and **renown** in [Bellwright](https://store.steampowered.com/app/1812450/Bellwright/)
 save files. GUI and CLI included.
 
 ![screenshot](docs/screenshot.png)
@@ -16,6 +16,14 @@ save files. GUI and CLI included.
 
 No offsets, no hex editing. Gold is located automatically by structure, and every
 write is re-parsed and verified before the file is replaced.
+
+**Renown** is also editable, with one extra step: it is stored as one of
+thousands of identically-shaped reputation records and nothing structural marks
+it out, so the tool can't read it on its own. Enter the renown value the game
+currently shows (character sheet) plus the value you want; the tool finds the
+one record matching your current value and rewrites it. If two records happen to
+share that value it refuses rather than guess — nudge renown in-game by an odd
+amount and retry.
 
 > ⚠️ **Single-player convenience tool.** Editing saves is at your own risk —
 > always keep the `.bak` it creates. Close the game (or return to the main menu)
@@ -63,8 +71,9 @@ the app shows it so you can pick the right one.
 A headless `bellwright-gold-cli` binary ships alongside the GUI:
 
 ```bash
-bellwright-gold-cli info <save.sav>          # show name, village, current gold
-bellwright-gold-cli set  <save.sav> <amount> # set gold (creates <save>.bak once)
+bellwright-gold-cli info <save.sav>                        # show name, village, current gold
+bellwright-gold-cli set  <save.sav> <amount>               # set gold (creates <save>.bak once)
+bellwright-gold-cli set-renown <save.sav> <current> <new>  # set renown (current = value shown in-game)
 ```
 
 Build just the CLI (no GUI libraries):
@@ -78,7 +87,10 @@ cargo build --release --no-default-features --bin bellwright-gold-cli
 Bellwright saves are a UE `FArchive::SerializeCompressed` container (magic `VSWB`)
 wrapping an Oodle-Kraken-compressed custom protobuf blob. Player gold is protobuf
 field 6 inside a uniquely shaped record, located via the globally-unique byte
-signature `2a 04 ?? ?? ?? ?? 30 <varint> 3a`.
+signature `2a 04 ?? ?? ?? ?? 30 <varint> 3a`. Renown is one entry in a large list
+of identically-shaped reputation records (`20 89 c8 9b dd 02 22 <len> 08 <id1>
+10 <value> 28 bb 0d`); since nothing structural is unique to it, it's located by
+matching `<value>` against the current renown you supply.
 
 On save, the tool rewrites only the affected chunk(s) as uncompressed Oodle blocks,
 fixes the enclosing protobuf length-prefixes when the value's byte-width changes,
@@ -91,7 +103,7 @@ Full reverse-engineered format notes: [`docs/save_format.md`](docs/save_format.m
 ## Project layout
 
 ```
-src/lib.rs        core: parse, decompress, locate gold, patch (no GUI deps, unit-tested)
+src/lib.rs        core: parse, decompress, locate gold/renown, patch (no GUI deps, unit-tested)
 src/main.rs       egui/eframe desktop GUI
 src/bin/cli.rs    headless CLI
 docs/             format spec + screenshot

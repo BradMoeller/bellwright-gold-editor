@@ -3,6 +3,19 @@
 All notable changes to this project are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Renown editing** (GUI + `bellwright-gold-cli set-renown <save> <current> <new>`).
+  Renown is one of thousands of identically-shaped reputation records with no
+  unique structural marker, so it's located by matching the current value the
+  player supplies; ambiguous matches are refused rather than guessed.
+- Investigation notes in `bellwright_renown/FINDINGS.md` (outside this repo).
+
+### Changed
+- Renown writes verify by reloading and comparing the full decompressed payload
+  (value-independent), instead of re-finding by value.
+
 ## [1.0.0] - 2026-06-04
 
 ### Added
