@@ -87,7 +87,8 @@ cargo build --release --no-default-features --bin bellwright-gold-cli
 Bellwright saves are a UE `FArchive::SerializeCompressed` container (magic `VSWB`)
 wrapping an Oodle-Kraken-compressed custom protobuf blob. Player gold is protobuf
 field 6 inside a uniquely shaped record, located via the globally-unique byte
-signature `2a 04 ?? ?? ?? ?? 30 <varint> 3a`. Renown is one entry in a large list
+signature `2a <len> <id> 30 <varint> 3a` (the `<id>` length is 4 bytes in save
+format v7, 6 bytes in v8 — it's read as a varint, not hardcoded). Renown is one entry in a large list
 of identically-shaped reputation records (`20 89 c8 9b dd 02 22 <len> 08 <id1>
 10 <value> 28 bb 0d`); since nothing structural is unique to it, it's located by
 matching `<value>` against the current renown you supply.

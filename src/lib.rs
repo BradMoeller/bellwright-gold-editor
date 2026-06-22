@@ -4,7 +4,8 @@
 //! is a custom protobuf blob.
 //!
 //! **Gold** is protobuf field 6 inside a record matched by the globally-unique
-//! signature `2a 04 ?? ?? ?? ?? 30 <varint> 3a`.
+//! signature `2a <len> <id> 30 <varint> 3a` (the `<id>` length is read as a
+//! varint: 4 bytes in save format v7, 6 bytes in v8).
 //!
 //! **Renown** is one entry in a large list of identically-shaped reputation
 //! records `20 89 c8 9b dd 02 22 <len> 08 <id1> 10 <value> 28 bb 0d`; nothing
@@ -16,7 +17,11 @@
 use std::path::Path;
 
 const BLOCK: usize = 131072; // 128 KiB uncompressed block size
-const TABLE_OFF: usize = 0x490;
+
+/// UE `PACKAGE_FILE_TAG` that begins the `SerializeCompressed` container.
+/// Everything structural (Summary.CompressedSize, the byte-shifted total-size
+/// copy, and the chunk table) sits at fixed offsets relative to this tag.
+const PACKAGE_FILE_TAG: [u8; 4] = [0xc1, 0x83, 0x2a, 0x9e];
 
 #[derive(Debug)]
 pub enum Error {
@@ -94,6 +99,13 @@ pub struct SaveFile {
     pub total: usize,
     pub nchunks: usize,
     pub data_start: usize,
+    /// Offset of the chunk table (tag + 0x20). Differs by format version
+    /// (0x490 in v7, 0xc90 in v8), so it's derived, not hardcoded.
+    pub table_off: usize,
+    /// Offset of Summary.CompressedSize (u32 LE, tag + 0x11).
+    pub summary_off: usize,
+    /// Offset of the byte-shifted total-uncompressed-size copy (u32 LE, tag + 0x19).
+    pub totalcopy_off: usize,
     /// (comp_size, uncomp_size, file_offset_of_compressed_data)
     pub chunks: Vec<(usize, usize, usize)>,
     pub decompressed: Vec<u8>,
@@ -127,8 +139,20 @@ impl SaveFile {
         if total == 0 || total > 1 << 30 {
             return Err(Error::BadFile("implausible uncompressed size".into()));
         }
+        // Locate the SerializeCompressed container by its tag. Its position
+        // moved between format versions (v7: 0x470, v8: 0xc70), so search the
+        // header region rather than assuming a fixed offset.
+        const SEARCH_LIMIT: usize = 0x4000;
+        let tag = raw[..SEARCH_LIMIT.min(raw.len())]
+            .windows(4)
+            .position(|w| w == PACKAGE_FILE_TAG)
+            .ok_or_else(|| Error::BadFile("compression container tag not found".into()))?;
+        let table_off = tag + 0x20;
+        let summary_off = tag + 0x11;
+        let totalcopy_off = tag + 0x19;
+
         let nchunks = total.div_ceil(BLOCK);
-        let data_start = TABLE_OFF + nchunks * 16 + 1;
+        let data_start = table_off + nchunks * 16 + 1;
         if data_start >= raw.len() {
             return Err(Error::BadFile("chunk table overruns file".into()));
         }
@@ -139,7 +163,7 @@ impl SaveFile {
         let mut ext = oozextract::Extractor::new();
         let mut pos = data_start;
         for i in 0..nchunks {
-            let b = TABLE_OFF + i * 16;
+            let b = table_off + i * 16;
             let comp = (raw[b + 1] as usize)
                 | ((raw[b + 2] as usize) << 8)
                 | ((raw[b + 3] as usize) << 16);
@@ -178,27 +202,41 @@ impl SaveFile {
             total,
             nchunks,
             data_start,
+            table_off,
+            summary_off,
+            totalcopy_off,
             chunks,
             decompressed,
         })
     }
 
-    /// Locate the (unique) gold field. The signature `2a 04 ?? ?? ?? ?? 30 <varint> 3a`
-    /// is globally unique across observed saves; we require exactly one match.
+    /// Locate the (unique) gold field. The record has the shape
+    /// `2a <len> <id bytes> 30 <gold varint> 3a` — a length-delimited field 5
+    /// (an id) immediately followed by varint field 6 (gold) and the start of
+    /// field 7 (`3a`). This combination is globally unique across observed saves;
+    /// we require exactly one match.
+    ///
+    /// The id's length is read as a varint rather than hardcoded: it was 4 bytes
+    /// in save format v7 and grew to 6 bytes in v8 (`2a 04 …` → `2a 06 …`).
     pub fn find_gold(&self) -> Result<GoldLoc, Error> {
         let d = &self.decompressed;
         let mut hits = Vec::new();
         let mut i = 0usize;
-        while i + 8 < d.len() {
-            if d[i] == 0x2a && d[i + 1] == 0x04 && d[i + 6] == 0x30 {
-                if let Some((val, j, ln)) = read_varint(d, i + 7) {
-                    if j < d.len() && d[j] == 0x3a {
-                        hits.push(GoldLoc {
-                            tag_off: i + 6,
-                            value_off: i + 7,
-                            byte_len: ln,
-                            value: val,
-                        });
+        while i + 2 < d.len() {
+            if d[i] == 0x2a {
+                if let Some((id_len, id_start, _)) = read_varint(d, i + 1) {
+                    let tag_off = id_start + id_len as usize;
+                    if tag_off < d.len() && d[tag_off] == 0x30 {
+                        if let Some((val, j, ln)) = read_varint(d, tag_off + 1) {
+                            if j < d.len() && d[j] == 0x3a {
+                                hits.push(GoldLoc {
+                                    tag_off,
+                                    value_off: tag_off + 1,
+                                    byte_len: ln,
+                                    value: val,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -342,7 +380,7 @@ impl SaveFile {
                 out.extend_from_slice(&nd[nd_pos..nd_pos + uncomp]);
                 nd_pos += uncomp;
                 new_table[i].0 = comp;
-                let b = TABLE_OFF + i * 16;
+                let b = self.table_off + i * 16;
                 out[b+1] = (comp & 0xFF) as u8;
                 out[b+2] = ((comp >> 8) & 0xFF) as u8;
                 out[b+3] = ((comp >> 16) & 0xFF) as u8;
@@ -356,9 +394,9 @@ impl SaveFile {
         }
 
         out[0x18..0x20].copy_from_slice(&(new_total as u64).to_le_bytes());
-        out[0x489..0x48d].copy_from_slice(&(new_total as u32).to_le_bytes());
+        out[self.totalcopy_off..self.totalcopy_off + 4].copy_from_slice(&(new_total as u32).to_le_bytes());
         let sum_comp: usize = new_table.iter().map(|c| c.0).sum();
-        out[0x481..0x485].copy_from_slice(&(sum_comp as u32).to_le_bytes());
+        out[self.summary_off..self.summary_off + 4].copy_from_slice(&(sum_comp as u32).to_le_bytes());
 
         verify_renown(&out, &nd)?;
         Ok(out)
@@ -513,7 +551,7 @@ impl SaveFile {
                 out.extend_from_slice(&nd[nd_pos..nd_pos + uncomp]);
                 nd_pos += uncomp;
                 new_table[i].0 = comp;
-                let b = TABLE_OFF + i * 16;
+                let b = self.table_off + i * 16;
                 out[b + 1] = (comp & 0xFF) as u8;
                 out[b + 2] = ((comp >> 8) & 0xFF) as u8;
                 out[b + 3] = ((comp >> 16) & 0xFF) as u8;
@@ -528,11 +566,11 @@ impl SaveFile {
 
         // Update total uncompressed size: 0x18 (u64) and byte-shifted copy at 0x489 (u32).
         out[0x18..0x20].copy_from_slice(&(new_total as u64).to_le_bytes());
-        out[0x489..0x48d].copy_from_slice(&(new_total as u32).to_le_bytes());
+        out[self.totalcopy_off..self.totalcopy_off + 4].copy_from_slice(&(new_total as u32).to_le_bytes());
 
         // Update Summary.CompressedSize (0x481) = sum of all chunk comp sizes.
         let sum_comp: usize = new_table.iter().map(|c| c.0).sum();
-        out[0x481..0x485].copy_from_slice(&(sum_comp as u32).to_le_bytes());
+        out[self.summary_off..self.summary_off + 4].copy_from_slice(&(sum_comp as u32).to_le_bytes());
 
         // Self-check: reload and verify gold reads back correctly.
         verify(&out, new_value)?;

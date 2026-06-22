@@ -5,6 +5,18 @@ All notable changes to this project are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Fixed
+- **Save format v8 support** (post-patch saves). A game patch bumped the `VSWB`
+  version 7→8 and shifted the entire `SerializeCompressed` container +0x800 bytes
+  (chunk table `0x490`→`0xc90`, Summary.CompressedSize `0x481`→`0xc81`, total-size
+  copy `0x489`→`0xc89`). The loader now locates the container by its
+  `PACKAGE_FILE_TAG` and derives every offset relative to it, so it loads v7 and
+  v8 alike. Previously v8 saves failed with "chunk 0 out of bounds".
+- **Relocated gold field.** The gold record's field-5 id grew from 4 to 6 bytes
+  (`2a 04 …` → `2a 06 …`), so the old fixed-offset signature missed it ("Could not
+  locate the gold field"). The id length is now read as a varint, matching both
+  formats.
+
 ### Added
 - **Renown editing** (GUI + `bellwright-gold-cli set-renown <save> <current> <new>`).
   Renown is one of thousands of identically-shaped reputation records with no

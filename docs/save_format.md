@@ -52,12 +52,33 @@ Offset    Size    Description
 
 This is UE's standard `FArchive::SerializeCompressed` container (hence `PACKAGE_FILE_TAG` `c1 83 2a 9e` and the load-time check below).
 
+### Format version 8 (post-patch, mid-2026) — the container moved
+
+A game patch bumped `Version` (0x0004) from **7 to 8**. In v8 the entire
+`SerializeCompressed` container is shifted **+0x800 bytes**: the value at 0x0468
+is now **5** (was 4), 0x0470–0x0c6f is reserved/zero, and:
+
+| field                   | v7 offset | v8 offset |
+|-------------------------|-----------|-----------|
+| `PACKAGE_FILE_TAG`      | `0x0470`  | `0x0c70`  |
+| Summary.CompressedSize  | `0x0481`  | `0x0c81`  |
+| total-size copy (u32)   | `0x0489`  | `0x0c89`  |
+| Chunk table             | `0x0490`  | `0x0c90`  |
+
+The name strings (0x0020–0x0320) and `Total uncompressed size` (0x0018) stay
+put. Everything structural keeps a **fixed offset relative to the tag**
+(table = tag+0x20, Summary = tag+0x11, total-copy = tag+0x19), so the robust
+approach is to **locate `c1 83 2a 9e` in the header and derive the rest** rather
+than hardcode v7 offsets. Do this and the same code loads v7 and v8.
+
 ### Chunk count is variable per save
 
-Do **not** assume a fixed count or data offset. Derive both from the header:
+Do **not** assume a fixed count or data offset. Derive both from the header
+(`tag` = offset of `c1 83 2a 9e`):
 ```
+table_off  = tag + 0x20                   # 0x490 in v7, 0xc90 in v8
 nchunks    = ceil( u64@0x18 / 131072 )
-data_start = 0x490 + nchunks*16 + 1     # +1 for the global prefix byte
+data_start = table_off + nchunks*16 + 1   # +1 for the global prefix byte
 ```
 (e.g. 227 chunks for the big saves, 225 for smaller ones.) Hardcoding `0x12c1` silently produces garbage.
 
@@ -142,11 +163,19 @@ varint(n) = [n]                              if n ≤ 127
 
 ## Editing Gold
 
-Gold = protobuf field 6 at decompressed offset **`0xa6c7f`** = chunk **5**, in-chunk **`0x6c7f`**:
+Gold is **protobuf field 6**, located not by a fixed offset (it moves between
+playthroughs) but by the unique record shape `2a <len> <id> 30 <gold> 3a` — a
+length-delimited field 5 (an id beginning `e9 52 dd 57`) immediately followed by
+varint field 6 (gold) and the start of field 7 (`3a`):
 ```
-... 2a 04 e9 52 dd 57 | 30 <gold varint> | 3a 18 08 ...
-                         ^tag field6, wire0
+v7:  ... 2a 04 e9 52 dd 57       | 30 <gold varint> | 3a 18 08 ...
+v8:  ... 2a 06 e9 52 dd 57 d6 61 | 30 <gold varint> | 3a 18 08 ...
+                                    ^tag field6, wire0
 ```
+**The id length changed with the patch**: field 5 was 4 bytes in v7 (`2a 04 …`)
+and is 6 bytes in v8 (`2a 06 …`). Read the `2a` length as a varint and skip that
+many bytes to reach the `30` tag — don't assume the gold tag is at id+6. This one
+match is globally unique across observed saves.
 
 ### Case A — new value fits in the same number of varint bytes (≤ 16383)
 
@@ -186,6 +215,37 @@ Steps (in addition to Case A):
 - Reassemble using each chunk's declared `uncomp_size`; total must equal `u64@0x18`.
 - Σ(chunk `comp_size`) must equal `Summary.CompressedSize` (0x481).
 - Parse the protobuf top-down from offset 0; it should reach the gold field reading the new value, with every container length consistent and no overruns.
+
+---
+
+## Editing Renown
+
+Renown lives in a large repeated list of **reputation records**, each shaped:
+
+```
+20 89 c8 9b dd 02   22 <len>   08 <id1>  10 <value>   28 bb 0d
+└─ field4 = const ─┘ └ submsg of len bytes:           ┘ └ field5 = 1723 ┘
+                       08 <id1> 10 <value>
+```
+
+- `10 <value>` is the renown amount.
+- The record is **not** uniquely identifiable by structure: `28 bb 0d` (id2 =
+  1723) is constant across all ~7365 records, `id1` varies between saves, and the
+  trailing UUID / shared timestamps are not stable either.
+
+So locate it **by value**: the player reads their current renown off the
+character sheet, and you search for the one record whose `<value>` matches.
+Empirically `10 <varint(renown)>` is globally unique in the ~30 MB payload for
+real renown numbers. If two records share the value, refuse and ask the player to
+nudge renown in-game to make it unique.
+
+Editing is mechanically identical to gold (Case A / Case B above): on a
+byte-width change, walk the protobuf from the root and bump every enclosing
+length-prefix (the innermost being the `22 <len>` submessage), then re-emit the
+touched chunk(s). Verified by round-trip: 2188 → 50000 (2→3-byte grow) → 300
+(3→2-byte shrink) all reload cleanly.
+
+Full investigation writeup: `~/dev/bellwright_renown/FINDINGS.md`.
 
 ---
 
