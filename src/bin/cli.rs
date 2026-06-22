@@ -25,12 +25,20 @@ fn main() {
         );
         std::process::exit(2);
     };
-    if args.len() < 3 { usage(); }
+    if args.len() < 3 {
+        usage();
+    }
 
     match args[1].as_str() {
         "info" => {
-            let s = SaveFile::load(&args[2]).unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
-            let gold = s.find_gold().unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+            let s = SaveFile::load(&args[2]).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
+            let gold = s.find_gold().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
             println!("name:      {}", s.display_name);
             println!("village:   {}", s.village);
             println!("character: {}", s.character);
@@ -38,20 +46,30 @@ fn main() {
             println!("renown:    (enter the in-game value to edit it; see set-renown)");
         }
         "set" => {
-            if args.len() < 4 { usage(); }
+            if args.len() < 4 {
+                usage();
+            }
             let amount = parse_amount(&args[3]);
             match set_gold_on_disk(&args[2], amount) {
                 Ok(()) => println!("ok: gold set to {amount} (backup at <file>.bak)"),
-                Err(e) => { eprintln!("error: {e}"); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
             }
         }
         "set-renown" => {
-            if args.len() < 5 { usage(); }
+            if args.len() < 5 {
+                usage();
+            }
             let current = parse_amount(&args[3]);
             let new = parse_amount(&args[4]);
             match set_renown_on_disk(&args[2], current, new) {
                 Ok(()) => println!("ok: renown {current} -> {new} (backup at <file>.bak)"),
-                Err(e) => { eprintln!("error: {e}"); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
             }
         }
         _ => usage(),

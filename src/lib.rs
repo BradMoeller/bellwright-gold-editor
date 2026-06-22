@@ -40,9 +40,17 @@ impl std::fmt::Display for Error {
             Error::BadFile(s) => write!(f, "Not a recognizable Bellwright save: {s}"),
             Error::Decompress(s) => write!(f, "Decompression failed: {s}"),
             Error::GoldNotFound(0) => write!(f, "Could not locate the gold field in this save."),
-            Error::GoldNotFound(n) => write!(f, "Ambiguous: found {n} possible gold fields; refusing to edit."),
-            Error::RenownNotFound(0) => write!(f, "Could not locate the renown field in this save."),
-            Error::RenownNotFound(n) => write!(f, "Ambiguous: found {n} possible renown fields; refusing to edit."),
+            Error::GoldNotFound(n) => write!(
+                f,
+                "Ambiguous: found {n} possible gold fields; refusing to edit."
+            ),
+            Error::RenownNotFound(0) => {
+                write!(f, "Could not locate the renown field in this save.")
+            }
+            Error::RenownNotFound(n) => write!(
+                f,
+                "Ambiguous: found {n} possible renown fields; refusing to edit."
+            ),
             Error::ParseError(s) => write!(f, "Save structure error: {s}"),
             Error::TooLarge(s) => write!(f, "Unsupported edit: {s}"),
         }
@@ -278,7 +286,9 @@ impl SaveFile {
             i += 1; // advance past this anchor for the next search regardless
             let q = i - 1 + ANCHOR.len();
             // Submessage length, then its bounds.
-            let Some((sublen, sub_start, _)) = read_varint(d, q) else { continue };
+            let Some((sublen, sub_start, _)) = read_varint(d, q) else {
+                continue;
+            };
             let sub_end = sub_start + sublen as usize;
             if sub_end + ID2.len() > d.len() {
                 continue;
@@ -287,11 +297,15 @@ impl SaveFile {
             if d[sub_start] != 0x08 {
                 continue;
             }
-            let Some((_id1, after_id1, _)) = read_varint(d, sub_start + 1) else { continue };
+            let Some((_id1, after_id1, _)) = read_varint(d, sub_start + 1) else {
+                continue;
+            };
             if after_id1 >= d.len() || d[after_id1] != 0x10 {
                 continue;
             }
-            let Some((val, after_val, vl)) = read_varint(d, after_id1 + 1) else { continue };
+            let Some((val, after_val, vl)) = read_varint(d, after_id1 + 1) else {
+                continue;
+            };
             // The value must end exactly at the submessage boundary, and the
             // constant id2 trailer must follow.
             if after_val != sub_end || &d[sub_end..sub_end + ID2.len()] != ID2 {
@@ -366,7 +380,9 @@ impl SaveFile {
         #[allow(clippy::needless_range_loop)]
         for i in c0..=c1 {
             let mut uncomp = self.chunks[i].1;
-            if i == c1 { uncomp = (uncomp as isize + total_delta) as usize; }
+            if i == c1 {
+                uncomp = (uncomp as isize + total_delta) as usize;
+            }
             new_table[i].1 = uncomp;
         }
 
@@ -376,17 +392,18 @@ impl SaveFile {
             if i >= c0 && i <= c1 {
                 let uncomp = new_table[i].1;
                 let comp = uncomp + 2;
-                out.push(0xCC); out.push(0x06);
+                out.push(0xCC);
+                out.push(0x06);
                 out.extend_from_slice(&nd[nd_pos..nd_pos + uncomp]);
                 nd_pos += uncomp;
                 new_table[i].0 = comp;
                 let b = self.table_off + i * 16;
-                out[b+1] = (comp & 0xFF) as u8;
-                out[b+2] = ((comp >> 8) & 0xFF) as u8;
-                out[b+3] = ((comp >> 16) & 0xFF) as u8;
-                out[b+9]  = (uncomp & 0xFF) as u8;
-                out[b+10] = ((uncomp >> 8) & 0xFF) as u8;
-                out[b+11] = ((uncomp >> 16) & 0xFF) as u8;
+                out[b + 1] = (comp & 0xFF) as u8;
+                out[b + 2] = ((comp >> 8) & 0xFF) as u8;
+                out[b + 3] = ((comp >> 16) & 0xFF) as u8;
+                out[b + 9] = (uncomp & 0xFF) as u8;
+                out[b + 10] = ((uncomp >> 8) & 0xFF) as u8;
+                out[b + 11] = ((uncomp >> 16) & 0xFF) as u8;
             } else {
                 let (comp, _, pos) = self.chunks[i];
                 out.extend_from_slice(&self.raw[pos..pos + comp]);
@@ -394,9 +411,11 @@ impl SaveFile {
         }
 
         out[0x18..0x20].copy_from_slice(&(new_total as u64).to_le_bytes());
-        out[self.totalcopy_off..self.totalcopy_off + 4].copy_from_slice(&(new_total as u32).to_le_bytes());
+        out[self.totalcopy_off..self.totalcopy_off + 4]
+            .copy_from_slice(&(new_total as u32).to_le_bytes());
         let sum_comp: usize = new_table.iter().map(|c| c.0).sum();
-        out[self.summary_off..self.summary_off + 4].copy_from_slice(&(sum_comp as u32).to_le_bytes());
+        out[self.summary_off..self.summary_off + 4]
+            .copy_from_slice(&(sum_comp as u32).to_le_bytes());
 
         verify_renown(&out, &nd)?;
         Ok(out)
@@ -566,11 +585,13 @@ impl SaveFile {
 
         // Update total uncompressed size: 0x18 (u64) and byte-shifted copy at 0x489 (u32).
         out[0x18..0x20].copy_from_slice(&(new_total as u64).to_le_bytes());
-        out[self.totalcopy_off..self.totalcopy_off + 4].copy_from_slice(&(new_total as u32).to_le_bytes());
+        out[self.totalcopy_off..self.totalcopy_off + 4]
+            .copy_from_slice(&(new_total as u32).to_le_bytes());
 
         // Update Summary.CompressedSize (0x481) = sum of all chunk comp sizes.
         let sum_comp: usize = new_table.iter().map(|c| c.0).sum();
-        out[self.summary_off..self.summary_off + 4].copy_from_slice(&(sum_comp as u32).to_le_bytes());
+        out[self.summary_off..self.summary_off + 4]
+            .copy_from_slice(&(sum_comp as u32).to_le_bytes());
 
         // Self-check: reload and verify gold reads back correctly.
         verify(&out, new_value)?;
